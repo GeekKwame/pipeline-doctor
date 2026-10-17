@@ -39,9 +39,10 @@ pip install -e ".[dev]"
 ## Quick Start
 
 ```python
+import os
 from pathlib import Path
-from pipeline_doctor.github_client import FakeGitHubClient  # Replace with real client
-from pipeline_doctor.grok_client import FakeGrokClient      # Replace with GrokAPIClient
+from pipeline_doctor.github_client import GitHubClient
+from pipeline_doctor.grok_client import GrokAPIClient
 from pipeline_doctor.evidence import EvidenceCollector
 from pipeline_doctor.orchestrator import DiagnosisOrchestrator
 from pipeline_doctor.prompts import PromptLoader
@@ -49,8 +50,8 @@ from pipeline_doctor.redaction import SecretRedactor, SizeLimiter
 from pipeline_doctor.validator import IncidentReportValidator
 
 # Set up components
-github = FakeGitHubClient()  # Use real GitHub client in production
-grok = FakeGrokClient()      # Use GrokAPIClient(api_key="...") in production
+github = GitHubClient(token=os.environ["GITHUB_TOKEN"])
+grok = GrokAPIClient(api_key=os.environ.get("GROK_API_KEY"))
 redactor = SecretRedactor()
 limiter = SizeLimiter()
 
@@ -128,24 +129,38 @@ All tests use deterministic fixtures and mocked dependencies - no network calls 
 
 ### What's NOT Integrated Yet
 
-- ❌ Real GitHub REST API client (protocol defined, implementation needed)
 - ❌ Production bot/automation workflow
 - ❌ GitHub App integration
 - ❌ Webhook handlers
 - ❌ Automated PR creation with fixes
-- ❌ Live testing with real GitHub Actions runs
 
 ### GitHub API Integration
 
-To integrate with real GitHub, implement the `GitHubClient` protocol defined in `src/pipeline_doctor/protocols.py`.
+✅ **Real GitHub client implemented** (`GitHubClient` in `src/pipeline_doctor/github_client.py`)
 
-**Required GitHub REST API endpoints**:
+**Features**:
+- Read-only operations (GET requests only)
+- Token from environment variable or constructor
+- Token redaction from error messages
+- Rate limit handling (403/429 with reset headers)
+- 404 handling for missing resources
+- Log download with redirect/zip handling
+- Commit SHA pinning for file fetches
+- Request budget enforcement (max 50 requests)
+
+**GitHub REST API endpoints used**:
 - `GET /repos/{owner}/{repo}/actions/runs/{run_id}` - Get workflow run
 - `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs` - List jobs
 - `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs` - Download logs
 - `GET /repos/{owner}/{repo}/contents/{path}?ref={sha}` - Get file at commit
 
 **Authentication**: Read-only personal access token with `repo` or `actions:read` scope.
+
+**Testing status**: Comprehensive tests with mocked HTTP (no network calls). Tests cover success paths, 404s, rate limiting, log redirects/zip, token redaction, request budget, and verification that no write methods exist.
+
+**CLI Example**: See `examples/diagnose_run.py` for a working example that runs diagnosis against real GitHub Actions runs.
+
+**Testing**: For tests, use `FakeGitHubClient` from the same module, which implements the same protocol but uses in-memory test data.
 
 ### Grok API Integration
 
