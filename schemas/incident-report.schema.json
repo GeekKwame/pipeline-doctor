@@ -1,0 +1,480 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GeekKwame/pipeline-doctor/schemas/incident-report.schema.json",
+  "title": "Pipeline Doctor Incident Report",
+  "description": "Comprehensive diagnostic report for GitHub Actions workflow failures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "incident",
+    "failure",
+    "diagnosis",
+    "evidence",
+    "proposed_patch",
+    "verification",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version of the incident report schema",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "incident": {
+      "type": "object",
+      "description": "Metadata about the CI/CD incident",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "run_id",
+        "run_url",
+        "commit_sha",
+        "branch",
+        "workflow_name",
+        "workflow_path",
+        "event",
+        "triggered_at",
+        "conclusion"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "description": "Repository in owner/name format",
+          "pattern": "^[^/]+/[^/]+$"
+        },
+        "run_id": {
+          "type": "integer",
+          "description": "GitHub Actions run ID",
+          "minimum": 1
+        },
+        "run_url": {
+          "type": "string",
+          "description": "URL to the GitHub Actions run",
+          "format": "uri"
+        },
+        "commit_sha": {
+          "type": "string",
+          "description": "Git commit SHA (40 hex characters)",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "branch": {
+          "type": "string",
+          "description": "Branch name"
+        },
+        "workflow_name": {
+          "type": "string",
+          "description": "Name of the workflow"
+        },
+        "workflow_path": {
+          "type": "string",
+          "description": "Path to workflow file"
+        },
+        "event": {
+          "type": "string",
+          "description": "GitHub event that triggered the workflow"
+        },
+        "triggered_at": {
+          "type": ["string", "null"],
+          "description": "ISO 8601 timestamp when workflow was triggered",
+          "format": "date-time"
+        },
+        "conclusion": {
+          "type": "string",
+          "description": "GitHub Actions conclusion status",
+          "enum": [
+            "success",
+            "failure",
+            "cancelled",
+            "skipped",
+            "timed_out",
+            "action_required",
+            "neutral",
+            "startup_failure"
+          ]
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "description": "Details about the failure",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "summary",
+        "job",
+        "failed_step",
+        "locations"
+      ],
+      "properties": {
+        "category": {
+          "type": "string",
+          "description": "Failure category",
+          "enum": [
+            "build_failure",
+            "test_failure",
+            "dependency_failure",
+            "configuration_error",
+            "permission_error",
+            "timeout",
+            "infrastructure_failure",
+            "external_service_failure",
+            "insufficient_evidence"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "description": "Brief summary of the failure"
+        },
+        "job": {
+          "type": ["object", "null"],
+          "description": "Job information",
+          "additionalProperties": false,
+          "required": ["name", "id", "url"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Job name"
+            },
+            "id": {
+              "type": "integer",
+              "description": "Job ID"
+            },
+            "url": {
+              "type": ["string", "null"],
+              "description": "URL to the job",
+              "format": "uri"
+            }
+          }
+        },
+        "failed_step": {
+          "type": "object",
+          "description": "Step that failed",
+          "additionalProperties": false,
+          "required": ["name", "number", "status"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Step name"
+            },
+            "number": {
+              "type": "integer",
+              "description": "Step number in the job",
+              "minimum": 1
+            },
+            "status": {
+              "type": "string",
+              "description": "Step status",
+              "enum": [
+                "completed",
+                "in_progress",
+                "queued",
+                "pending",
+                "waiting",
+                "requested"
+              ]
+            }
+          }
+        },
+        "locations": {
+          "type": "array",
+          "description": "Source code locations related to the failure",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "start_line", "end_line", "evidence_ids"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "File path"
+              },
+              "start_line": {
+                "type": "integer",
+                "description": "Starting line number",
+                "minimum": 1
+              },
+              "end_line": {
+                "type": "integer",
+                "description": "Ending line number",
+                "minimum": 1
+              },
+              "evidence_ids": {
+                "type": "array",
+                "description": "Evidence IDs supporting this location",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "diagnosis": {
+      "type": "object",
+      "description": "Root cause analysis and diagnosis",
+      "additionalProperties": false,
+      "required": [
+        "root_cause",
+        "technical_explanation",
+        "observed_facts",
+        "inferences",
+        "confidence",
+        "confidence_level",
+        "supporting_evidence_ids",
+        "primary_vs_cascading",
+        "alternative_hypotheses"
+      ],
+      "properties": {
+        "root_cause": {
+          "type": "string",
+          "description": "Root cause of the failure"
+        },
+        "technical_explanation": {
+          "type": "string",
+          "description": "Detailed technical explanation"
+        },
+        "observed_facts": {
+          "type": "array",
+          "description": "Directly observed facts from evidence",
+          "items": {
+            "type": "string"
+          }
+        },
+        "inferences": {
+          "type": "array",
+          "description": "Logical inferences drawn from facts",
+          "items": {
+            "type": "string"
+          }
+        },
+        "confidence": {
+          "type": "number",
+          "description": "Confidence score (0.0 to 1.0)",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "confidence_level": {
+          "type": "string",
+          "description": "Categorical confidence level",
+          "enum": ["low", "medium", "high", "insufficient"]
+        },
+        "supporting_evidence_ids": {
+          "type": "array",
+          "description": "Evidence IDs supporting the root cause",
+          "items": {
+            "type": "string"
+          }
+        },
+        "primary_vs_cascading": {
+          "type": "string",
+          "description": "Analysis of whether this is a primary failure or cascading effect"
+        },
+        "alternative_hypotheses": {
+          "type": "array",
+          "description": "Alternative explanations considered",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["description", "evidence_ids", "likelihood"],
+            "properties": {
+              "description": {
+                "type": "string",
+                "description": "Description of alternative hypothesis"
+              },
+              "evidence_ids": {
+                "type": "array",
+                "description": "Evidence supporting this hypothesis",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "likelihood": {
+                "type": "string",
+                "description": "Likelihood assessment"
+              }
+            }
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "description": "Collection of evidence items",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "source", "location", "log_excerpt", "observation", "supports"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique evidence identifier"
+          },
+          "type": {
+            "type": "string",
+            "description": "Type of evidence",
+            "enum": [
+              "log",
+              "workflow_yaml",
+              "source_file",
+              "dependency_manifest",
+              "test_result",
+              "api_response",
+              "other"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "Source of the evidence"
+          },
+          "location": {
+            "type": "string",
+            "description": "Location or path to the evidence"
+          },
+          "log_excerpt": {
+            "type": ["string", "null"],
+            "description": "Relevant excerpt from logs"
+          },
+          "observation": {
+            "type": "string",
+            "description": "What was observed in this evidence"
+          },
+          "supports": {
+            "type": "string",
+            "description": "What this evidence supports"
+          }
+        }
+      }
+    },
+    "proposed_patch": {
+      "type": "object",
+      "description": "Proposed fix for the issue",
+      "additionalProperties": false,
+      "required": [
+        "available",
+        "target_files",
+        "change_type",
+        "unified_diff",
+        "rationale",
+        "risk",
+        "requires_human_approval",
+        "applied",
+        "tested"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean",
+          "description": "Whether a patch is available"
+        },
+        "target_files": {
+          "type": "array",
+          "description": "Files that would be modified",
+          "items": {
+            "type": "string"
+          }
+        },
+        "change_type": {
+          "type": "string",
+          "description": "Type of change",
+          "enum": [
+            "fix",
+            "configuration",
+            "dependency_update",
+            "refactor",
+            "documentation",
+            "none"
+          ]
+        },
+        "unified_diff": {
+          "type": ["string", "null"],
+          "description": "Unified diff of proposed changes"
+        },
+        "rationale": {
+          "type": "string",
+          "description": "Explanation of why this fix addresses the issue"
+        },
+        "risk": {
+          "type": "object",
+          "description": "Risk assessment",
+          "additionalProperties": false,
+          "required": ["level", "description"],
+          "properties": {
+            "level": {
+              "type": "string",
+              "description": "Risk level",
+              "enum": ["low", "medium", "high"]
+            },
+            "description": {
+              "type": "string",
+              "description": "Risk description"
+            }
+          }
+        },
+        "requires_human_approval": {
+          "type": "boolean",
+          "description": "Whether human approval is required (always true when patch is available)"
+        },
+        "applied": {
+          "type": "boolean",
+          "description": "Whether the patch has been applied"
+        },
+        "tested": {
+          "type": "boolean",
+          "description": "Whether the patch has been tested"
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "description": "Verification status and steps",
+      "additionalProperties": false,
+      "required": ["status", "steps", "verified_at", "executed_by"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Verification status",
+          "enum": ["not_run", "passed", "failed", "partial"]
+        },
+        "steps": {
+          "type": "array",
+          "description": "Verification steps",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["description", "command", "expected_result"],
+            "properties": {
+              "description": {
+                "type": "string",
+                "description": "Step description"
+              },
+              "command": {
+                "type": ["string", "null"],
+                "description": "Command to run (null if manual verification)"
+              },
+              "expected_result": {
+                "type": "string",
+                "description": "Expected result"
+              }
+            }
+          }
+        },
+        "verified_at": {
+          "type": ["string", "null"],
+          "description": "ISO 8601 timestamp when verification was performed",
+          "format": "date-time"
+        },
+        "executed_by": {
+          "type": ["string", "null"],
+          "description": "Who executed the verification"
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "description": "Limitations and caveats of the analysis",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
