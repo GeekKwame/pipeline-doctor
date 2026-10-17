@@ -124,7 +124,15 @@ class EvidenceCollector:
                     )
                 )
             except Exception as e:
-                limitations.append(f"Failed to fetch job logs: {str(e)}")
+                # Preserve specific error types for accurate limitation messages
+                from .github_client import PermissionError as GitHubPermissionError, RateLimitError
+                
+                if isinstance(e, GitHubPermissionError):
+                    limitations.append("insufficient permissions to download logs")
+                elif isinstance(e, RateLimitError):
+                    limitations.append(f"rate limit exceeded while fetching logs: {str(e)}")
+                else:
+                    limitations.append(f"Failed to fetch job logs: {str(e)}")
 
         workflow_yaml = None
         workflow_path = run_metadata.get("path")
@@ -161,7 +169,7 @@ class EvidenceCollector:
         owner: str,
         repo: str,
         file_paths: List[str],
-    ) -> Dict[str, str]:
+    ) -> Dict[str, any]:
         """
         Fetch source files at the pinned commit SHA.
 
@@ -171,16 +179,20 @@ class EvidenceCollector:
             file_paths: List of file paths to fetch
 
         Returns:
-            Dictionary mapping file paths to redacted content
+            Dictionary containing:
+                - files: Dictionary mapping file paths to redacted content
+                - limitations: List of limitation strings for failed fetches
         """
         if not self.pinned_sha:
-            return {}
+            return {"files": {}, "limitations": ["No pinned SHA available for file fetching"]}
 
         files = {}
+        limitations = []
         fetched_count = 0
 
         for path in file_paths:
             if fetched_count >= self.limiter.max_files:
+                limitations.append(f"Maximum file limit reached ({self.limiter.max_files}), skipping remaining files")
                 break
 
             try:
@@ -188,10 +200,27 @@ class EvidenceCollector:
                 truncated = self.limiter.truncate_file(raw_content)
                 files[path] = self.redactor.redact(truncated)
                 fetched_count += 1
-            except Exception:
-                pass
+            except Exception as e:
+                # Record each failure as a limitation
+                from .github_client import (
+                    NotAFileError, 
+                    NotFoundError, 
+                    PermissionError as GitHubPermissionError,
+                    RateLimitError
+                )
+                
+                if isinstance(e, NotAFileError):
+                    limitations.append(f"Cannot fetch {path}: path is a directory")
+                elif isinstance(e, NotFoundError):
+                    limitations.append(f"File not found: {path}")
+                elif isinstance(e, GitHubPermissionError):
+                    limitations.append(f"Insufficient permissions to fetch {path}")
+                elif isinstance(e, RateLimitError):
+                    limitations.append(f"Rate limit exceeded while fetching {path}")
+                else:
+                    limitations.append(f"Failed to fetch {path}: {str(e)}")
 
-        return files
+        return {"files": files, "limitations": limitations}
 
     def _next_evidence_id(self) -> str:
         """Generate next evidence ID."""

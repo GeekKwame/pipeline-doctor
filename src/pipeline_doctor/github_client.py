@@ -7,8 +7,8 @@ import zipfile
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
-from urllib.request import Request, urlopen
+from urllib.parse import urljoin, quote
+from urllib.request import Request, urlopen, HTTPRedirectHandler, build_opener
 
 
 class GitHubAPIError(Exception):
@@ -26,6 +26,47 @@ class RateLimitError(GitHubAPIError):
 class NotFoundError(GitHubAPIError):
     """Raised when resource is not found."""
     pass
+
+
+class PermissionError(GitHubAPIError):
+    """Raised when access is denied (not rate limit)."""
+    pass
+
+
+class NotAFileError(GitHubAPIError):
+    """Raised when path points to a directory, not a file."""
+    pass
+
+
+class SafeRedirectHandler(HTTPRedirectHandler):
+    """
+    Custom redirect handler that strips Authorization header on cross-host redirects.
+    
+    This prevents leaking credentials when GitHub redirects to a different host
+    (e.g., storage.googleapis.com for log downloads).
+    """
+    
+    def __init__(self, original_host: str, auth_header: Optional[str] = None):
+        super().__init__()
+        self.original_host = original_host
+        self.auth_header = auth_header
+    
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Strip Authorization header if redirecting to a different host."""
+        m = self.http_error_302(req, fp, code, msg, headers, newurl)
+        if m:
+            # Check if host changed
+            from urllib.parse import urlparse
+            original_parsed = urlparse(req.full_url)
+            new_parsed = urlparse(newurl)
+            
+            if original_parsed.netloc != new_parsed.netloc:
+                # Cross-host redirect - remove Authorization header
+                if 'Authorization' in m.headers:
+                    del m.headers['Authorization']
+        return m
+    
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = redirect_request
 
 
 class GitHubClient:
@@ -71,6 +112,7 @@ class GitHubClient:
         Raises:
             RateLimitError: When rate limit is exceeded
             NotFoundError: When resource is not found
+            PermissionError: When access is denied (not rate limit)
             GitHubAPIError: For other API errors
         """
         if self.request_count >= self.max_requests:
@@ -89,14 +131,17 @@ class GitHubClient:
         request = Request(url, headers=headers)
         
         try:
-            with urlopen(request) as response:
-                # Check for redirect
-                if follow_redirects and response.geturl() != url:
-                    # Follow the redirect
-                    redirect_request = Request(response.geturl())
-                    with urlopen(redirect_request) as redirect_response:
-                        return redirect_response.read()
-                return response.read()
+            if follow_redirects:
+                # Use custom opener with safe redirect handler
+                from urllib.parse import urlparse
+                original_host = urlparse(url).netloc
+                redirect_handler = SafeRedirectHandler(original_host, self.token)
+                opener = build_opener(redirect_handler)
+                with opener.open(request) as response:
+                    return response.read()
+            else:
+                with urlopen(request) as response:
+                    return response.read()
                 
         except HTTPError as e:
             # Redact token from error message
@@ -106,10 +151,38 @@ class GitHubClient:
             if e.code == 404:
                 raise NotFoundError(error_msg)
             elif e.code in (403, 429):
-                # Rate limit
-                reset_at = e.headers.get("X-RateLimit-Reset")
-                reset_int = int(reset_at) if reset_at else None
-                raise RateLimitError(error_msg, reset_at=reset_int)
+                # Check if it's actually a rate limit error
+                headers_dict = dict(e.headers)
+                
+                # Check for rate limit indicators
+                is_rate_limit = False
+                
+                # Check X-RateLimit-Remaining header
+                if 'X-RateLimit-Remaining' in headers_dict:
+                    try:
+                        remaining = int(headers_dict['X-RateLimit-Remaining'])
+                        if remaining == 0:
+                            is_rate_limit = True
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Check for Retry-After header
+                if 'Retry-After' in headers_dict:
+                    is_rate_limit = True
+                
+                # Check error message for rate limit keywords
+                error_lower = error_body.lower()
+                rate_limit_keywords = ['rate limit', 'rate-limit', 'ratelimit', 'too many requests']
+                if any(keyword in error_lower for keyword in rate_limit_keywords):
+                    is_rate_limit = True
+                
+                if is_rate_limit:
+                    reset_at = headers_dict.get("X-RateLimit-Reset")
+                    reset_int = int(reset_at) if reset_at else None
+                    raise RateLimitError(error_msg, reset_at=reset_int)
+                else:
+                    # Not a rate limit, it's a permission error
+                    raise PermissionError(error_msg)
             else:
                 raise GitHubAPIError(error_msg)
                 
@@ -171,7 +244,7 @@ class GitHubClient:
         """
         Download logs for a job.
         
-        GitHub returns logs as a redirect to a zip file or direct download.
+        GitHub returns logs as a redirect to a zip file or plain text.
         
         Args:
             owner: Repository owner
@@ -180,29 +253,33 @@ class GitHubClient:
             
         Returns:
             Log content as string
+            
+        Raises:
+            RateLimitError: When rate limit is exceeded
+            PermissionError: When access is denied
+            NotFoundError: When job is not found
+            GitHubAPIError: For other API errors
         """
         path = f"/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
         url = urljoin(self.API_BASE, path)
         
+        # GitHub redirects to log storage; follow with safe redirect handler
+        data = self._make_request(url, follow_redirects=True)
+        
+        # Try to extract from zip first
         try:
-            # GitHub redirects to a zip file
-            data = self._make_request(url, follow_redirects=True)
-            
-            # Try to extract from zip
-            try:
-                with zipfile.ZipFile(BytesIO(data)) as zf:
-                    # Usually a single file in the zip
-                    names = zf.namelist()
-                    if names:
-                        with zf.open(names[0]) as f:
-                            return f.read().decode("utf-8", errors="replace")
-            except zipfile.BadZipFile:
-                # Not a zip, return as-is
-                return data.decode("utf-8", errors="replace")
-                
-        except Exception as e:
-            error_msg = self._redact_token_from_message(str(e))
-            raise GitHubAPIError(f"Failed to download logs: {error_msg}")
+            with zipfile.ZipFile(BytesIO(data)) as zf:
+                # Usually a single file in the zip
+                names = zf.namelist()
+                if names:
+                    with zf.open(names[0]) as f:
+                        return f.read().decode("utf-8", errors="replace")
+        except zipfile.BadZipFile:
+            # Not a zip, treat as plain text
+            pass
+        
+        # Return as plain text
+        return data.decode("utf-8", errors="replace")
     
     def get_file_content(self, owner: str, repo: str, path: str, ref: str) -> str:
         """
@@ -216,14 +293,40 @@ class GitHubClient:
             
         Returns:
             File content as string
+            
+        Raises:
+            NotAFileError: When path points to a directory
+            GitHubAPIError: For other API errors
         """
-        api_path = f"/repos/{owner}/{repo}/contents/{path}?ref={ref}"
+        # URL-encode the path
+        encoded_path = quote(path, safe='/')
+        api_path = f"/repos/{owner}/{repo}/contents/{encoded_path}?ref={ref}"
         response = self._get_json(api_path)
         
-        # GitHub returns base64-encoded content
+        # Check if it's a directory
+        if isinstance(response, list):
+            raise NotAFileError(f"Path is a directory, not a file: {path}")
+        
+        # GitHub returns base64-encoded content for small files
         content_b64 = response.get("content", "")
+        
+        # Check if content is empty (files over 1 MB)
         if not content_b64:
-            raise GitHubAPIError(f"No content returned for {path}")
+            # Try to get the file via git blob API
+            sha = response.get("sha")
+            if sha:
+                try:
+                    blob_path = f"/repos/{owner}/{repo}/git/blobs/{sha}"
+                    blob_response = self._get_json(blob_path)
+                    blob_content = blob_response.get("content", "")
+                    if blob_content:
+                        content_b64 = blob_content
+                    else:
+                        raise GitHubAPIError(f"File too large and blob API returned no content: {path}")
+                except Exception as e:
+                    raise GitHubAPIError(f"File over 1 MB and failed to fetch via blob API: {path}")
+            else:
+                raise GitHubAPIError(f"No content returned for {path} (file may be too large)")
         
         # Remove whitespace that GitHub adds
         content_b64 = content_b64.replace("\n", "").replace(" ", "")
