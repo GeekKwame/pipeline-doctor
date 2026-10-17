@@ -606,6 +606,32 @@ def test_bug6_file_path_is_url_encoded():
         assert "path with spaces" not in request_url
 
 
+def test_ref_parameter_is_url_encoded():
+    """Test that ref parameter is URL-encoded in contents requests."""
+    with patch("pipeline_doctor.github_client.urlopen") as mock_urlopen:
+        file_content = "test content"
+        content_b64 = base64.b64encode(file_content.encode()).decode()
+        
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"content": content_b64}).encode()
+        mock_response.__enter__.return_value = mock_response
+        mock_response.__exit__.return_value = False
+        mock_urlopen.return_value = mock_response
+        
+        client = GitHubClient(token="ghp_test")
+        # Use a ref with special characters that need encoding
+        ref_with_special_chars = "feature/test-branch#123"
+        client.get_file_content("owner", "repo", "README.md", ref_with_special_chars)
+        
+        # Check that the request URL has encoded ref
+        call_args = mock_urlopen.call_args[0][0]
+        request_url = call_args.full_url
+        
+        # Should have encoded # character (%23), not literal #
+        assert "ref=feature%2Ftest-branch%23123" in request_url
+        assert "ref=feature/test-branch#123" not in request_url
+
+
 def test_bug7_large_file_fallback_to_blob_api():
     """
     BUG 7 REGRESSION TEST: Files over 1 MB return empty content from contents API.
