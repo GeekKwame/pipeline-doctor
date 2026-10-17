@@ -1,0 +1,162 @@
+{
+  "schema_version": "1.0.0",
+  "incident": {
+    "repository": "example-org/example-project",
+    "run_id": 9876543210,
+    "run_url": "https://github.com/example-org/example-project/actions/runs/9876543210",
+    "commit_sha": "1234567890abcdef1234567890abcdef12345678",
+    "branch": "feature/add-authentication",
+    "workflow_name": "CI Pipeline",
+    "workflow_path": ".github/workflows/ci.yml",
+    "event": "pull_request",
+    "triggered_at": "2024-10-15T14:32:18Z",
+    "conclusion": "failure"
+  },
+  "failure": {
+    "category": "test_failure",
+    "summary": "Authentication integration tests failed due to missing environment variable",
+    "job": {
+      "name": "integration-tests",
+      "id": 22334455,
+      "url": "https://github.com/example-org/example-project/actions/runs/9876543210/job/22334455"
+    },
+    "failed_step": {
+      "name": "Run integration tests",
+      "number": 5,
+      "status": "completed"
+    },
+    "locations": [
+      {
+        "path": "tests/integration/test_auth.py",
+        "start_line": 45,
+        "end_line": 52,
+        "evidence_ids": ["E1", "E3"]
+      },
+      {
+        "path": "src/auth/oauth_provider.py",
+        "start_line": 78,
+        "end_line": 82,
+        "evidence_ids": ["E3"]
+      }
+    ]
+  },
+  "diagnosis": {
+    "root_cause": "Missing AUTH_SECRET_KEY environment variable in workflow configuration",
+    "technical_explanation": "The OAuth authentication provider requires AUTH_SECRET_KEY to be set as an environment variable. The workflow configuration does not include this secret in the integration-tests job, causing the authentication initialization to fail when tests attempt to create OAuth sessions.",
+    "observed_facts": [
+      "Test test_oauth_login failed with KeyError: 'AUTH_SECRET_KEY'",
+      "Stack trace shows failure in oauth_provider.py line 80",
+      "Workflow YAML does not define AUTH_SECRET_KEY in job environment",
+      "Other jobs in the workflow have the secret configured",
+      "Previous successful runs included this environment variable"
+    ],
+    "inferences": [
+      "The environment variable was likely removed or renamed during recent workflow refactoring",
+      "The failure is specific to the integration-tests job configuration",
+      "Unit tests pass because they mock the OAuth provider and don't require actual secrets"
+    ],
+    "confidence": 0.85,
+    "confidence_level": "high",
+    "supporting_evidence_ids": ["E1", "E2", "E3"],
+    "primary_vs_cascading": "This is a primary failure. The missing environment variable is the root cause. All subsequent authentication-related test failures are cascading effects of this configuration issue.",
+    "alternative_hypotheses": [
+      {
+        "description": "Secret value was rotated and workflow secret was not updated",
+        "evidence_ids": ["E1"],
+        "likelihood": "Less likely. The error is KeyError indicating the variable is undefined, not an authentication failure which would suggest an invalid secret value."
+      },
+      {
+        "description": "Recent code change introduced a new secret dependency without updating CI",
+        "evidence_ids": ["E3"],
+        "likelihood": "Possible. The code expects AUTH_SECRET_KEY but this could be a new requirement. However, git history (if available) would clarify this."
+      }
+    ]
+  },
+  "evidence": [
+    {
+      "id": "E1",
+      "type": "log",
+      "source": "integration-tests job logs",
+      "location": "https://github.com/example-org/example-project/actions/runs/9876543210/job/22334455",
+      "log_excerpt": "FAILED tests/integration/test_auth.py::test_oauth_login - KeyError: 'AUTH_SECRET_KEY'\n  File \"/home/runner/work/example-project/src/auth/oauth_provider.py\", line 80, in __init__\n    self.secret_key = os.environ['AUTH_SECRET_KEY']",
+      "observation": "Test fails with KeyError when attempting to access AUTH_SECRET_KEY environment variable",
+      "supports": "Root cause identification - missing environment variable"
+    },
+    {
+      "id": "E2",
+      "type": "workflow_yaml",
+      "source": "Workflow configuration file",
+      "location": ".github/workflows/ci.yml",
+      "log_excerpt": "integration-tests:\n  runs-on: ubuntu-latest\n  steps:\n    - uses: actions/checkout@v3\n    - name: Set up Python\n      uses: actions/setup-python@v4\n    - name: Run integration tests\n      run: pytest tests/integration/\n      # Note: No environment secrets defined for this job",
+      "observation": "Workflow job configuration lacks environment variable or secrets definition",
+      "supports": "Confirms the environment variable is not configured in the workflow"
+    },
+    {
+      "id": "E3",
+      "type": "source_file",
+      "source": "Authentication provider source code",
+      "location": "src/auth/oauth_provider.py",
+      "log_excerpt": "class OAuthProvider:\n    def __init__(self, client_id: str, redirect_uri: str):\n        self.client_id = client_id\n        self.redirect_uri = redirect_uri\n        self.secret_key = os.environ['AUTH_SECRET_KEY']  # Line 80\n        self._initialize_session()",
+      "observation": "Code expects AUTH_SECRET_KEY to be present in environment variables without a default or fallback",
+      "supports": "Shows the code dependency on the environment variable"
+    },
+    {
+      "id": "E4",
+      "type": "workflow_yaml",
+      "source": "Other job configuration for comparison",
+      "location": ".github/workflows/ci.yml",
+      "log_excerpt": "unit-tests:\n  runs-on: ubuntu-latest\n  env:\n    AUTH_SECRET_KEY: ${{ secrets.AUTH_SECRET_KEY }}\n  steps:\n    - name: Run unit tests\n      run: pytest tests/unit/",
+      "observation": "Other jobs in the same workflow correctly configure the AUTH_SECRET_KEY environment variable",
+      "supports": "Demonstrates that the secret exists in repository settings and is used elsewhere"
+    }
+  ],
+  "proposed_patch": {
+    "available": true,
+    "target_files": [".github/workflows/ci.yml"],
+    "change_type": "configuration",
+    "unified_diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -45,6 +45,8 @@\n integration-tests:\n   runs-on: ubuntu-latest\n+  env:\n+    AUTH_SECRET_KEY: ${{ secrets.AUTH_SECRET_KEY }}\n   steps:\n     - uses: actions/checkout@v3\n     - name: Set up Python",
+    "rationale": "Add the AUTH_SECRET_KEY environment variable to the integration-tests job configuration, mirroring the configuration used in the unit-tests job. This will make the required secret available to the OAuth provider during integration test execution.",
+    "risk": {
+      "level": "low",
+      "description": "This is a configuration-only change that adds a required environment variable. No code logic is modified. The secret already exists in repository settings and is used successfully in other jobs."
+    },
+    "requires_human_approval": true,
+    "applied": false,
+    "tested": false
+  },
+  "verification": {
+    "status": "not_run",
+    "steps": [
+      {
+        "description": "Apply the patch to add AUTH_SECRET_KEY to integration-tests job",
+        "command": null,
+        "expected_result": "Workflow file updated with environment variable configuration"
+      },
+      {
+        "description": "Trigger the workflow on a test branch",
+        "command": null,
+        "expected_result": "Workflow run is created"
+      },
+      {
+        "description": "Monitor the integration-tests job",
+        "command": null,
+        "expected_result": "Job completes successfully with all authentication tests passing"
+      },
+      {
+        "description": "Verify no KeyError in job logs",
+        "command": null,
+        "expected_result": "No AUTH_SECRET_KEY KeyError appears in logs"
+      }
+    ],
+    "verified_at": null,
+    "executed_by": null
+  },
+  "limitations": [
+    "ILLUSTRATIVE EXAMPLE ONLY - This is a fictional incident report for demonstration purposes",
+    "Repository example-org/example-project does not exist",
+    "Commit SHA is a placeholder (not a real commit)",
+    "Could not access repository git history to determine when AUTH_SECRET_KEY dependency was introduced",
+    "Unable to verify if the AUTH_SECRET_KEY secret actually exists in repository settings",
+    "Test code beyond the stack trace excerpt was not analyzed"
+  ]
+}
