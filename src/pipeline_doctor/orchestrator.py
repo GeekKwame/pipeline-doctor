@@ -112,15 +112,18 @@ class DiagnosisOrchestrator:
             )
 
         source_files = {}
+        fetch_limitations = []
         if additional_files:
-            source_files = self.evidence_collector.fetch_source_files(
+            fetch_result = self.evidence_collector.fetch_source_files(
                 owner, repo, additional_files
             )
+            source_files = fetch_result.get("files", {})
+            fetch_limitations = fetch_result.get("limitations", [])
 
         failed_job = evidence_data["failed_job"]
         logs = evidence_data["logs"] or ""
         workflow_yaml = evidence_data["workflow_yaml"] or ""
-        limitations = evidence_data["limitations"]
+        limitations = evidence_data["limitations"] + fetch_limitations
 
         system_prompt = self.prompt_loader.load_system_prompt()
         user_message = self.prompt_loader.format_user_message(
