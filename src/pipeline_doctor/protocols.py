@@ -86,8 +86,10 @@ class GrokClient(Protocol):
         self,
         system_prompt: str,
         user_message: str,
-        model: str = "grok-beta",
+        model: Optional[str] = None,
         temperature: float = 0.1,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[str] = None,
     ) -> str:
         """
         Send chat completion request to Grok.
@@ -95,8 +97,10 @@ class GrokClient(Protocol):
         Args:
             system_prompt: System prompt
             user_message: User message
-            model: Model identifier
+            model: Model identifier (optional, uses default if not provided)
             temperature: Sampling temperature
+            max_tokens: Maximum tokens to generate (optional)
+            response_format: Response format (optional, e.g. 'json_object')
 
         Returns:
             Model response as string

@@ -3,10 +3,18 @@
 CLI tool to diagnose a GitHub Actions workflow run.
 
 This script demonstrates the real GitHub client in action.
-Requires GITHUB_TOKEN environment variable.
+GITHUB_TOKEN is optional (works with public repos, logs may be unavailable).
+Grok client can be real (with GROK_API_KEY) or fake (with --fake flag).
 
 Usage:
-    export GITHUB_TOKEN="ghp_your_token_here"
+    # With real Grok (requires GROK_API_KEY):
+    export GROK_API_KEY="xai-..."
+    python examples/diagnose_run.py owner/repo 12345
+    
+    # With fake Grok (for testing):
+    python examples/diagnose_run.py --fake owner/repo 12345
+    
+    # Public repo without GitHub token (logs may be unavailable):
     python examples/diagnose_run.py owner/repo 12345
 
 Output:
@@ -14,6 +22,7 @@ Output:
     Does NOT execute any AI-generated commands.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -24,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from pipeline_doctor.evidence import EvidenceCollector
 from pipeline_doctor.github_client import GitHubClient, GitHubAPIError, NotFoundError, RateLimitError
-from pipeline_doctor.grok_client import FakeGrokClient
+from pipeline_doctor.grok_client import FakeGrokClient, GrokAPIClient, GrokAPIError
 from pipeline_doctor.orchestrator import DiagnosisOrchestrator
 from pipeline_doctor.prompts import PromptLoader
 from pipeline_doctor.redaction import SecretRedactor, SizeLimiter
@@ -43,37 +52,70 @@ def parse_repository(repo_arg: str) -> tuple[str, str]:
 
 def main():
     """Main entry point."""
-    if len(sys.argv) != 3:
-        print("Usage: python diagnose_run.py owner/repo run_id", file=sys.stderr)
-        print("\nExample: python diagnose_run.py octocat/hello-world 12345", file=sys.stderr)
-        sys.exit(1)
-
+    parser = argparse.ArgumentParser(
+        description="Diagnose a GitHub Actions workflow run failure",
+        epilog="Does NOT execute AI-generated commands automatically."
+    )
+    parser.add_argument(
+        "--fake",
+        action="store_true",
+        help="Use fake Grok client instead of real API (for testing)"
+    )
+    parser.add_argument(
+        "repository",
+        help="Repository in owner/repo format"
+    )
+    parser.add_argument(
+        "run_id",
+        type=int,
+        help="GitHub Actions run ID"
+    )
+    
+    args = parser.parse_args()
+    
     # Parse arguments
     try:
-        owner, repo = parse_repository(sys.argv[1])
-        run_id = int(sys.argv[2])
+        owner, repo = parse_repository(args.repository)
+        run_id = args.run_id
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Check for token
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        print("Error: GITHUB_TOKEN environment variable not set", file=sys.stderr)
-        print("\nSet your token with:", file=sys.stderr)
-        print("  export GITHUB_TOKEN='ghp_your_token_here'", file=sys.stderr)
-        sys.exit(1)
+    # Check for tokens
+    github_token = os.environ.get("GITHUB_TOKEN")
+    grok_api_key = os.environ.get("GROK_API_KEY") or os.environ.get("XAI_API_KEY")
+    
+    if not github_token:
+        print("Warning: GITHUB_TOKEN not set. Using unauthenticated GitHub access.", file=sys.stderr)
+        print("         Job logs may be unavailable.", file=sys.stderr)
+        print("", file=sys.stderr)
+    
+    # Determine which Grok client to use
+    use_fake_grok = args.fake or not grok_api_key
+    
+    if use_fake_grok and not args.fake:
+        print("Warning: GROK_API_KEY not set. Using fake Grok client.", file=sys.stderr)
+        print("", file=sys.stderr)
+    elif args.fake:
+        print("Using fake Grok client (--fake flag)", file=sys.stderr)
+        print("", file=sys.stderr)
 
     print(f"Diagnosing workflow run: {owner}/{repo} run_id={run_id}", file=sys.stderr)
-    print(f"Token: {'*' * 10} (redacted)", file=sys.stderr)
+    if github_token:
+        print(f"GitHub token: {'*' * 10} (redacted)", file=sys.stderr)
+    print(f"Grok client: {'fake' if use_fake_grok else 'real'}", file=sys.stderr)
     print("", file=sys.stderr)
 
     # Set up components
     try:
-        github = GitHubClient(token=token, max_requests=50)
+        github = GitHubClient(token=github_token, max_requests=50)
         redactor = SecretRedactor()
         limiter = SizeLimiter()
-        grok = FakeGrokClient()  # Using fake client for demo
+        
+        if use_fake_grok:
+            grok = FakeGrokClient()
+        else:
+            grok = GrokAPIClient(api_key=grok_api_key)
 
         evidence_collector = EvidenceCollector(github, redactor, limiter)
         
@@ -102,6 +144,12 @@ def main():
             print(f"Confidence: {result.report.diagnosis.confidence_level}", file=sys.stderr)
             print(f"Evidence items: {len(result.report.evidence)}", file=sys.stderr)
             print(f"API requests made: {github.request_count}", file=sys.stderr)
+            
+            if result.limitations:
+                print(f"\nLimitations:", file=sys.stderr)
+                for limitation in result.limitations:
+                    print(f"  - {limitation}", file=sys.stderr)
+            
             print("\n--- Full Report (JSON) ---\n", file=sys.stderr)
             
             # Output JSON to stdout
@@ -112,6 +160,12 @@ def main():
             print("Errors:", file=sys.stderr)
             for error in result.errors:
                 print(f"  - {error}", file=sys.stderr)
+            
+            if result.limitations:
+                print(f"\nLimitations:", file=sys.stderr)
+                for limitation in result.limitations:
+                    print(f"  - {limitation}", file=sys.stderr)
+            
             sys.exit(1)
 
     except NotFoundError as e:
@@ -124,6 +178,11 @@ def main():
             import datetime
             reset_time = datetime.datetime.fromtimestamp(e.reset_at)
             print(f"Rate limit resets at: {reset_time}", file=sys.stderr)
+        sys.exit(1)
+    except GrokAPIError as e:
+        print(f"\n❌ Grok API error: {e}", file=sys.stderr)
+        if hasattr(e, 'status_code') and e.status_code:
+            print(f"Status code: {e.status_code}", file=sys.stderr)
         sys.exit(1)
     except GitHubAPIError as e:
         print(f"\n❌ GitHub API error: {e}", file=sys.stderr)

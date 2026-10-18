@@ -57,6 +57,8 @@ class DiagnosisOrchestrator:
         self.prompt_loader = prompt_loader
         self.validator = validator
         self.redactor = redactor
+        # Store GitHub client reference for SHA drift check
+        self.github_client = evidence_collector.github
 
     def diagnose(
         self,
@@ -103,13 +105,25 @@ class DiagnosisOrchestrator:
                 limitations=evidence_data["limitations"],
             )
 
-        current_sha = run_metadata.get("head_sha")
-        if current_sha != pinned_sha:
-            return DiagnosisResult(
-                success=False,
-                errors=[f"Commit SHA drift detected: pinned={pinned_sha}, current={current_sha}"],
-                limitations=evidence_data["limitations"],
-            )
+        failed_job = evidence_data["failed_job"]
+        logs = evidence_data["logs"] or ""
+        workflow_yaml = evidence_data["workflow_yaml"] or ""
+        evidence_items = evidence_data["evidence_items"]
+        limitations = evidence_data["limitations"].copy()
+
+        # Check for SHA drift by re-fetching run metadata
+        try:
+            current_run_metadata = self.github_client.get_workflow_run(owner, repo, run_id)
+            current_sha = current_run_metadata.get("head_sha")
+            if current_sha != pinned_sha:
+                return DiagnosisResult(
+                    success=False,
+                    errors=[f"Commit SHA drift detected: started with {pinned_sha}, now at {current_sha}"],
+                    limitations=limitations,
+                )
+        except Exception as e:
+            # If re-fetch fails, log limitation but continue
+            limitations.append(f"Could not verify SHA consistency: {str(e)}")
 
         source_files = {}
         fetch_limitations = []
@@ -120,10 +134,7 @@ class DiagnosisOrchestrator:
             source_files = fetch_result.get("files", {})
             fetch_limitations = fetch_result.get("limitations", [])
 
-        failed_job = evidence_data["failed_job"]
-        logs = evidence_data["logs"] or ""
-        workflow_yaml = evidence_data["workflow_yaml"] or ""
-        limitations = evidence_data["limitations"] + fetch_limitations
+        limitations = limitations + fetch_limitations
 
         system_prompt = self.prompt_loader.load_system_prompt()
         user_message = self.prompt_loader.format_user_message(
@@ -133,6 +144,7 @@ class DiagnosisOrchestrator:
             workflow_yaml=workflow_yaml,
             source_files=source_files,
             limitations=limitations,
+            evidence_items=evidence_items,
         )
 
         user_message_redacted = self.redactor.redact(user_message)
@@ -141,20 +153,27 @@ class DiagnosisOrchestrator:
             grok_response = self.grok_client.chat_completion(
                 system_prompt=system_prompt,
                 user_message=user_message_redacted,
-                model="grok-beta",
                 temperature=0.1,
             )
         except Exception as e:
+            # Surface structured error details if available
+            error_msg = str(e)
+            if hasattr(e, 'status_code') and hasattr(e, 'response_body'):
+                error_msg = f"Grok API error (status {e.status_code}): {e.response_body}"
+            else:
+                error_msg = f"Grok API error: {str(e)}"
             return DiagnosisResult(
                 success=False,
-                errors=[f"Grok API error: {str(e)}"],
+                errors=[error_msg],
                 limitations=limitations,
             )
 
         grok_response_redacted = self.redactor.redact(grok_response)
 
         known_files = set(source_files.keys()) if source_files else None
+        collected_evidence_ids = {item.id for item in evidence_items}
         self.validator.known_files = known_files
+        self.validator.collected_evidence_ids = collected_evidence_ids
 
         validation_result = self.validator.validate(grok_response_redacted)
 
