@@ -405,10 +405,10 @@ def test_bug1_authorization_header_not_leaked_on_redirect():
         # Verify build_opener was called (indicating custom redirect handler)
         mock_build_opener.assert_called_once()
         
-        # Verify the redirect handler is SafeRedirectHandler
+        # Verify the redirect handler is CountingRedirectHandler (which includes auth stripping)
         handler = mock_build_opener.call_args[0][0]
-        from pipeline_doctor.github_client import SafeRedirectHandler
-        assert isinstance(handler, SafeRedirectHandler)
+        from pipeline_doctor.github_client import CountingRedirectHandler
+        assert isinstance(handler, CountingRedirectHandler)
 
 
 def test_bug1_safe_redirect_handler_strips_auth_on_cross_host():

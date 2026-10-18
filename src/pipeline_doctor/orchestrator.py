@@ -123,6 +123,7 @@ class DiagnosisOrchestrator:
         failed_job = evidence_data["failed_job"]
         logs = evidence_data["logs"] or ""
         workflow_yaml = evidence_data["workflow_yaml"] or ""
+        evidence_items = evidence_data["evidence_items"]
         limitations = evidence_data["limitations"] + fetch_limitations
 
         system_prompt = self.prompt_loader.load_system_prompt()
@@ -133,6 +134,7 @@ class DiagnosisOrchestrator:
             workflow_yaml=workflow_yaml,
             source_files=source_files,
             limitations=limitations,
+            evidence_items=evidence_items,
         )
 
         user_message_redacted = self.redactor.redact(user_message)
@@ -141,20 +143,27 @@ class DiagnosisOrchestrator:
             grok_response = self.grok_client.chat_completion(
                 system_prompt=system_prompt,
                 user_message=user_message_redacted,
-                model="grok-beta",
                 temperature=0.1,
             )
         except Exception as e:
+            # Surface structured error details if available
+            error_msg = str(e)
+            if hasattr(e, 'status_code') and hasattr(e, 'response_body'):
+                error_msg = f"Grok API error (status {e.status_code}): {e.response_body}"
+            else:
+                error_msg = f"Grok API error: {str(e)}"
             return DiagnosisResult(
                 success=False,
-                errors=[f"Grok API error: {str(e)}"],
+                errors=[error_msg],
                 limitations=limitations,
             )
 
         grok_response_redacted = self.redactor.redact(grok_response)
 
         known_files = set(source_files.keys()) if source_files else None
+        collected_evidence_ids = {item.id for item in evidence_items}
         self.validator.known_files = known_files
+        self.validator.collected_evidence_ids = collected_evidence_ids
 
         validation_result = self.validator.validate(grok_response_redacted)
 

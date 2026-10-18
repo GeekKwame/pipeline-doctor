@@ -34,6 +34,7 @@ class IncidentReportValidator:
         self,
         known_files: Optional[Set[str]] = None,
         file_line_counts: Optional[Dict[str, int]] = None,
+        collected_evidence_ids: Optional[Set[str]] = None,
     ):
         """
         Initialize validator.
@@ -41,9 +42,11 @@ class IncidentReportValidator:
         Args:
             known_files: Set of known file paths in the repository
             file_line_counts: Mapping of file paths to their line counts
+            collected_evidence_ids: Set of evidence IDs that were actually collected
         """
         self.known_files = known_files
         self.file_line_counts = file_line_counts or {}
+        self.collected_evidence_ids = collected_evidence_ids
 
     def validate(self, data: Any) -> ValidationResult:
         """
@@ -54,6 +57,8 @@ class IncidentReportValidator:
         - JSON in markdown fences
         - Truncated data
         - Wrong types
+        - Empty responses
+        - Non-object JSON (arrays, strings)
 
         Args:
             data: Raw data (string, dict, or any other type)
@@ -63,9 +68,44 @@ class IncidentReportValidator:
         """
         errors = []
 
+        # Special case: empty or whitespace-only input
+        if isinstance(data, str) and not data.strip():
+            return ValidationResult(success=False, errors=["Response is empty"])
+        
+        # Check for non-object JSON types before extraction
+        if isinstance(data, str):
+            data_str = data.strip()
+            # Quick check for array or string literals
+            if data_str.startswith('['):
+                return ValidationResult(success=False, errors=[
+                    "Response is a JSON array, not an object. Expected a JSON object with incident report fields."
+                ])
+            if data_str.startswith('"'):
+                return ValidationResult(success=False, errors=[
+                    "Response is a JSON string, not an object. Expected a JSON object with incident report fields."
+                ])
+            # Check for other primitives
+            if data_str in ('null', 'true', 'false') or data_str.replace('.', '').replace('-', '').isdigit():
+                return ValidationResult(success=False, errors=[
+                    "Response is a JSON primitive, not an object. Expected a JSON object with incident report fields."
+                ])
+        
         parsed_data = self._extract_json(data)
         if parsed_data is None:
-            return ValidationResult(success=False, errors=["Failed to parse JSON from input"])
+            # Provide specific error based on what we found
+            if isinstance(data, str):
+                if '{' not in data:
+                    return ValidationResult(success=False, errors=[
+                        "No JSON object found in response. Response does not contain any '{' character."
+                    ])
+                else:
+                    return ValidationResult(success=False, errors=[
+                        "Failed to parse JSON from response. JSON may be truncated or malformed."
+                    ])
+            else:
+                return ValidationResult(success=False, errors=[
+                    f"Expected string or dict, got {type(data).__name__}"
+                ])
 
         try:
             report = IncidentReport.model_validate(parsed_data)
@@ -85,6 +125,10 @@ class IncidentReportValidator:
         if line_validation_errors:
             return ValidationResult(success=False, errors=line_validation_errors)
 
+        evidence_id_errors = self._validate_evidence_ids_against_collected(report)
+        if evidence_id_errors:
+            return ValidationResult(success=False, errors=evidence_id_errors)
+
         return ValidationResult(success=True, report=report)
 
     def _extract_json(self, data: Any) -> Optional[Dict[str, Any]]:
@@ -95,6 +139,7 @@ class IncidentReportValidator:
         - Direct dict
         - JSON string
         - JSON wrapped in markdown code fences
+        - Prose-wrapped JSON (extracts first balanced {...} object)
         - Truncated or malformed JSON
 
         Returns:
@@ -107,17 +152,83 @@ class IncidentReportValidator:
             return None
 
         data_str = data.strip()
+        
+        if not data_str:
+            return None
 
+        # Try markdown fence extraction first
         json_fence_pattern = r"```(?:json)?\s*\n(.*?)\n```"
         match = re.search(json_fence_pattern, data_str, re.DOTALL)
         if match:
             data_str = match.group(1).strip()
 
+        # Try parsing as-is
         try:
-            return json.loads(data_str)
+            parsed = json.loads(data_str)
+            if isinstance(parsed, dict):
+                return parsed
+            # If it's not a dict (array, string, etc.), that's an error
+            # but we handle it below
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to extract first balanced {...} object from prose
+        try:
+            extracted = self._extract_first_json_object(data_str)
+            if extracted:
+                parsed = json.loads(extracted)
+                if isinstance(parsed, dict):
+                    return parsed
         except json.JSONDecodeError:
             pass
 
+        return None
+    
+    def _extract_first_json_object(self, text: str) -> Optional[str]:
+        """
+        Extract the first balanced {...} JSON object from text.
+        
+        Args:
+            text: Text that may contain a JSON object
+            
+        Returns:
+            Extracted JSON string or None
+        """
+        # Find first {
+        start = text.find('{')
+        if start == -1:
+            return None
+        
+        # Balance braces to find matching }
+        depth = 0
+        in_string = False
+        escape_next = False
+        
+        for i in range(start, len(text)):
+            char = text[i]
+            
+            if escape_next:
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                continue
+            
+            if char == '"':
+                in_string = not in_string
+                continue
+            
+            if in_string:
+                continue
+            
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i+1]
+        
         return None
 
     def _validate_against_known_files(self, report: IncidentReport) -> List[str]:
@@ -170,6 +281,31 @@ class IncidentReportValidator:
                         f"exceeds file length {max_lines}"
                     )
 
+        return errors
+
+    def _validate_evidence_ids_against_collected(self, report: IncidentReport) -> List[str]:
+        """
+        Validate that evidence IDs in the report match those that were collected.
+        
+        Args:
+            report: Validated incident report
+            
+        Returns:
+            List of validation errors
+        """
+        if self.collected_evidence_ids is None:
+            return []
+        
+        errors = []
+        report_evidence_ids = {e.id for e in report.evidence}
+        
+        # Check for evidence IDs in report that weren't collected
+        invalid_ids = report_evidence_ids - self.collected_evidence_ids
+        if invalid_ids:
+            errors.append(
+                f"Report contains evidence IDs that were not in the collected set: {invalid_ids}"
+            )
+        
         return errors
 
     @staticmethod

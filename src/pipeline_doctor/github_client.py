@@ -69,6 +69,59 @@ class SafeRedirectHandler(HTTPRedirectHandler):
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = redirect_request
 
 
+class CountingRedirectHandler(HTTPRedirectHandler):
+    """
+    Redirect handler that counts redirects and strips auth on cross-host redirects.
+    
+    Also validates redirect schemes and detects redirect loops.
+    """
+    
+    def __init__(self, original_host: str, auth_header: Optional[str] = None, max_redirects: int = 10):
+        super().__init__()
+        self.original_host = original_host
+        self.auth_header = auth_header
+        self.max_redirects = max_redirects
+        self.redirect_count = 0
+        self.seen_urls = set()
+    
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Count redirects, detect loops, validate schemes, and strip auth on cross-host."""
+        from urllib.parse import urlparse
+        
+        # Check for redirect loop
+        if newurl in self.seen_urls:
+            raise GitHubAPIError(f"Redirect loop detected: {newurl}")
+        
+        self.seen_urls.add(newurl)
+        
+        # Validate scheme
+        new_parsed = urlparse(newurl)
+        if new_parsed.scheme not in ('http', 'https'):
+            raise GitHubAPIError(f"Invalid redirect scheme: {new_parsed.scheme}")
+        
+        # Increment counter
+        self.redirect_count += 1
+        
+        if self.redirect_count > self.max_redirects:
+            raise GitHubAPIError(f"Too many redirects (>{self.max_redirects})")
+        
+        # Call parent to create new request
+        m = self.http_error_302(req, fp, code, msg, headers, newurl)
+        
+        if m:
+            # Check if host changed
+            original_parsed = urlparse(req.full_url)
+            
+            if original_parsed.netloc != new_parsed.netloc:
+                # Cross-host redirect - remove Authorization header
+                if 'Authorization' in m.headers:
+                    del m.headers['Authorization']
+        
+        return m
+    
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = redirect_request
+
+
 class GitHubClient:
     """
     Read-only GitHub REST API client.
@@ -98,13 +151,14 @@ class GitHubClient:
             return message
         return message.replace(self.token, "[REDACTED-TOKEN]")
     
-    def _make_request(self, url: str, follow_redirects: bool = False) -> bytes:
+    def _make_request(self, url: str, follow_redirects: bool = False, max_redirect_hops: int = 10) -> bytes:
         """
         Make a GET request to GitHub API.
         
         Args:
             url: Full URL to request
             follow_redirects: Whether to follow redirects (for log downloads)
+            max_redirect_hops: Maximum redirect hops to count in budget
             
         Returns:
             Response body as bytes
@@ -113,7 +167,7 @@ class GitHubClient:
             RateLimitError: When rate limit is exceeded
             NotFoundError: When resource is not found
             PermissionError: When access is denied (not rate limit)
-            GitHubAPIError: For other API errors
+            GitHubAPIError: For other API errors including redirect loops
         """
         if self.request_count >= self.max_requests:
             raise GitHubAPIError(f"Request budget exceeded (max: {self.max_requests})")
@@ -135,9 +189,22 @@ class GitHubClient:
                 # Use custom opener with safe redirect handler
                 from urllib.parse import urlparse
                 original_host = urlparse(url).netloc
-                redirect_handler = SafeRedirectHandler(original_host, self.token)
+                redirect_handler = CountingRedirectHandler(
+                    original_host, 
+                    self.token, 
+                    max_redirects=max_redirect_hops
+                )
                 opener = build_opener(redirect_handler)
                 with opener.open(request) as response:
+                    # Count redirects against budget
+                    redirect_count = redirect_handler.redirect_count
+                    if redirect_count > 0:
+                        # Add redirect hops to request count
+                        self.request_count += redirect_count
+                        if self.request_count > self.max_requests:
+                            raise GitHubAPIError(
+                                f"Request budget exceeded after {redirect_count} redirects (max: {self.max_requests})"
+                            )
                     return response.read()
             else:
                 with urlopen(request) as response:
@@ -148,7 +215,10 @@ class GitHubClient:
             error_body = e.read().decode("utf-8", errors="replace")
             error_msg = self._redact_token_from_message(f"HTTP {e.code}: {error_body}")
             
-            if e.code == 404:
+            if e.code == 401:
+                # Authentication failed
+                raise PermissionError(error_msg)
+            elif e.code == 404:
                 raise NotFoundError(error_msg)
             elif e.code in (403, 429):
                 # Check if it's actually a rate limit error
@@ -188,10 +258,17 @@ class GitHubClient:
                 
         except URLError as e:
             error_msg = self._redact_token_from_message(str(e.reason))
+            # Check for specific redirect errors
+            reason_str = str(e.reason).lower()
+            if 'redirect' in reason_str:
+                raise GitHubAPIError(f"Redirect error: {error_msg}")
             raise GitHubAPIError(f"Network error: {error_msg}")
             
         except Exception as e:
             error_msg = self._redact_token_from_message(str(e))
+            # Check for redirect-related errors
+            if 'redirect' in str(e).lower():
+                raise GitHubAPIError(f"Redirect error: {error_msg}")
             raise GitHubAPIError(f"Request failed: {error_msg}")
     
     def _get_json(self, path: str) -> Dict[str, Any]:
