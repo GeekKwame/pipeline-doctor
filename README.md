@@ -1,195 +1,121 @@
 # Pipeline Doctor
 
-AI-powered GitHub Actions troubleshooting bot - incident report core library.
+**AI-powered GitHub Actions failure diagnosis** — Automatically analyzes workflow failures, identifies root causes, and proposes fixes with human oversight.
 
-## Overview
+Pipeline Doctor is a standalone Python library that collects evidence from failed GitHub Actions runs, uses AI (Grok) to diagnose the issue, and generates comprehensive incident reports with proposed fixes. All analysis is evidence-based, security-conscious, and requires human approval before any changes are applied.
 
-Pipeline Doctor is a standalone Python library that analyzes GitHub Actions workflow failures and generates comprehensive, structured incident reports. It uses AI (Grok) to diagnose issues, identify root causes, and propose fixes.
+## What It Does
 
-This is the **incident report core** - a standalone library providing diagnosis and reporting capabilities. It is **NOT yet integrated** into any production bot or automation system.
+- ✅ **Collects Evidence**: Fetches workflow metadata, job logs, YAML configs, and source files
+- ✅ **Diagnoses Failures**: Uses Grok AI to identify root causes and distinguish primary from cascading failures
+- ✅ **Generates Reports**: Produces JSON Schema-compliant incident reports with confidence scores
+- ✅ **Proposes Fixes**: Suggests patches with risk assessment (always requires human approval)
+- ✅ **Security-First**: Automatic secret redaction before AI processing, read-only GitHub access
+- ✅ **Validated Output**: Comprehensive Pydantic v2 models with cross-field validation
 
-## Features
+## What It Does NOT Do (Yet)
 
-- **Structured Incident Reports**: JSON Schema Draft 2020-12 compliant reports
-- **Evidence-Based Diagnosis**: Collects and analyzes logs, workflow YAML, and source files
-- **Root Cause Analysis**: Distinguishes primary failures from cascading effects
-- **Confidence Scoring**: Uncalibrated heuristic confidence levels (high/medium/low/insufficient)
-- **Security-First**: Automatic secret redaction before AI processing
-- **Validation**: Comprehensive Pydantic v2 models with cross-field validation
-- **Safety**: AI-generated fixes require human approval; nothing executes automatically
+- ❌ Automatic PR creation with fixes
+- ❌ GitHub App/webhook integration for auto-triggering
+- ❌ Automatic execution of AI-generated commands
+- ❌ Live monitoring or alerting
 
-## Requirements
+## Architecture
 
-- Python 3.11+
-- Pydantic v2
-- requests (for Grok API)
-
-## Installation
-
-```bash
-pip install -e .
+```mermaid
+graph LR
+    A[GitHub Actions Run] --> B[Evidence Collector]
+    B --> C[GitHub API Client]
+    C --> D[Secret Redactor]
+    D --> E[Grok AI Client]
+    E --> F[Validator]
+    F --> G[Incident Report]
+    
+    style A fill:#e1f5ff
+    style G fill:#d4edda
+    style D fill:#fff3cd
 ```
 
-For development with testing:
-
-```bash
-pip install -e ".[dev]"
-```
+**Flow**: GitHub run metadata + logs → Redacted evidence → Grok diagnosis → Validated JSON report → Human review
 
 ## Quick Start
 
-```python
-import os
-from pathlib import Path
-from pipeline_doctor.github_client import GitHubClient
-from pipeline_doctor.grok_client import GrokAPIClient
-from pipeline_doctor.evidence import EvidenceCollector
-from pipeline_doctor.orchestrator import DiagnosisOrchestrator
-from pipeline_doctor.prompts import PromptLoader
-from pipeline_doctor.redaction import SecretRedactor, SizeLimiter
-from pipeline_doctor.validator import IncidentReportValidator
+### 1. Install
 
-# Set up components
-github = GitHubClient(token=os.environ["GITHUB_TOKEN"])
-grok = GrokAPIClient(api_key=os.environ.get("GROK_API_KEY"))
-redactor = SecretRedactor()
-limiter = SizeLimiter()
-
-evidence_collector = EvidenceCollector(github, redactor, limiter)
-prompt_loader = PromptLoader(Path("prompts"))
-validator = IncidentReportValidator()
-
-orchestrator = DiagnosisOrchestrator(
-    evidence_collector,
-    grok,
-    prompt_loader,
-    validator,
-    redactor
-)
-
-# Run diagnosis
-result = orchestrator.diagnose("owner", "repo", run_id=12345)
-
-if result.success:
-    print("Root cause:", result.report.diagnosis.root_cause)
-    print("Confidence:", result.report.diagnosis.confidence_level)
-else:
-    print("Errors:", result.errors)
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-## Schema
+### 2. Set Environment Variables
 
-The incident report schema is defined in `schemas/incident-report.schema.json` (JSON Schema Draft 2020-12).
+```bash
+export GITHUB_TOKEN="ghp_..."        # Fine-grained read-only token
+export GROK_API_KEY="xai-..."        # xAI API key (or use --fake for testing)
+```
 
-See `docs/incident-report.md` for detailed field descriptions.
+### 3. Run Diagnosis
 
-## Testing
+```bash
+# Real diagnosis with Grok
+python3 examples/diagnose_run.py owner/repo 12345
 
-Run tests with pytest:
+# Test with fake AI (no API key needed)
+python3 examples/diagnose_run.py --fake owner/repo 12345
+```
+
+### 4. Run Tests
 
 ```bash
 pytest
 ```
 
-All tests use deterministic fixtures and mocked dependencies - no network calls or credentials required.
+### 5. Validate Example Report
 
-## Security
-
-**Secret Redaction**: Automatically redacts:
-- GitHub tokens (ghp_, gho_, ghs_, github_pat_)
-- AWS keys (AKIA..., aws_secret_access_key)
-- Bearer tokens
-- Private keys (PEM blocks)
-- Password/token/secret assignments
-- JWTs
-- ::add-mask:: values
-- High-entropy strings (potential credentials)
-
-**Size Limits**:
-- Logs truncated to 100KB (keeping context around errors)
-- Source files truncated to 50KB
-- Maximum 20 files fetched
-- Maximum 50 API requests
-
-**Safety**:
-- AI-generated commands are never executed automatically
-- Proposed patches always require human approval
-- All repo content and logs treated as untrusted data in prompts
-
-## Integration Status
-
-### What Works
-
-- ✅ Standalone library with full validation
-- ✅ Protocol-based dependency injection
-- ✅ Fake clients for testing
-- ✅ Evidence collection pipeline
-- ✅ Grok prompt template
-- ✅ Comprehensive validation
-
-### What's NOT Integrated Yet
-
-- ❌ Production bot/automation workflow
-- ❌ GitHub App integration
-- ❌ Webhook handlers
-- ❌ Automated PR creation with fixes
-
-### GitHub API Integration
-
-✅ **Real GitHub client implemented** (`GitHubClient` in `src/pipeline_doctor/github_client.py`)
-
-**Features**:
-- Read-only operations (GET requests only)
-- Token from environment variable or constructor
-- Token redaction from error messages
-- Rate limit handling (403/429 with reset headers)
-- 404 handling for missing resources
-- Log download with redirect/zip handling
-- Commit SHA pinning for file fetches
-- Request budget enforcement (max 50 requests)
-
-**GitHub REST API endpoints used**:
-- `GET /repos/{owner}/{repo}/actions/runs/{run_id}` - Get workflow run
-- `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs` - List jobs
-- `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs` - Download logs
-- `GET /repos/{owner}/{repo}/contents/{path}?ref={sha}` - Get file at commit
-
-**Authentication**: Read-only personal access token with `repo` or `actions:read` scope.
-
-**Testing status**: Comprehensive tests with mocked HTTP (no network calls). Tests cover success paths, 404s, rate limiting, log redirects/zip, token redaction, request budget, and verification that no write methods exist.
-
-**CLI Example**: See `examples/diagnose_run.py` for a working example that runs diagnosis against real GitHub Actions runs.
-
-**Testing**: For tests, use `FakeGitHubClient` from the same module, which implements the same protocol but uses in-memory test data.
-
-### Grok API Integration
-
-The `GrokAPIClient` in `src/pipeline_doctor/grok_client.py` is implemented but **untested with live API**.
-
-Set environment variable:
 ```bash
-export GROK_API_KEY="your-xai-api-key"
-# or
-export XAI_API_KEY="your-xai-api-key"
+python3 -c "
+import json
+from pipeline_doctor.validator import IncidentReportValidator
+report = json.load(open('examples/example-incident-report.json'))
+result = IncidentReportValidator().validate(report)
+print('✅ Valid!' if result.success else f'❌ Errors: {result.errors}')
+"
 ```
+
+## Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **GitHub Client** | ✅ Live | Real API client with read-only access; verified against public repos |
+| **Evidence Collection** | ✅ Live | Workflow runs, job logs, YAML, source files; SHA pinning |
+| **Secret Redaction** | ✅ Live | Patterns + high-entropy detection; known false positives on Docker image names |
+| **Grok Client** | ⚠️ Mock-tested | NOT verified against live xAI API (account had no credits) |
+| **Validation** | ✅ Live | Pydantic v2 + JSON Schema Draft 2020-12 |
+| **CLI Example** | ✅ Live | Works with `--fake` flag; real Grok untested |
+| **Log Download** | ✅ Live | Redirect + zip handling verified |
+| **Model Name** | ⚠️ Unverified | Default `grok-beta` is unverified; check `/v1/models` for valid names |
+
+**Verified Live**: Evidence collection and log download tested against real GitHub Actions runs.
+
+**Not Verified Live**: Grok API integration has NOT been tested against the live xAI API due to lack of credits. All Grok tests use mocked HTTP responses.
 
 ## Documentation
 
-- `README.md` - This file
-- `docs/incident-report.md` - Detailed schema and field documentation
-
-## Example
-
-See `examples/example-incident-report.json` for a complete, valid incident report (fictional data, marked illustrative).
+- **[Getting Started](docs/getting-started.md)** — Installation, tests, running the CLI example
+- **[Configuration](docs/configuration.md)** — All environment variables and constructor options
+- **[GitHub Token Setup](docs/github-token.md)** — Creating a fine-grained read-only token
+- **[xAI API Key Setup](docs/xai-api-key.md)** — Getting credits and choosing a model
+- **[Usage Guide](docs/usage.md)** — Running diagnoses, reading reports, end-to-end walkthrough
+- **[Troubleshooting](docs/troubleshooting.md)** — Common errors and fixes
+- **[Security](docs/security.md)** — Read-only guarantee, redaction, prompt injection stance
+- **[Incident Report Schema](docs/incident-report.md)** — Detailed schema documentation
+- **[Roadmap](docs/roadmap.md)** — Remaining work and known issues
 
 ## License
 
-See repository for license information.
+No license file found in repository. See repository for license information.
 
 ## Contributing
 
-This is a standalone library. Contributions welcome for:
-- Real GitHub API client implementation
-- Additional evidence collectors
-- Improved redaction patterns
-- Enhanced validation rules
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidelines.
