@@ -128,7 +128,11 @@ class EvidenceCollector:
                 from .github_client import PermissionError as GitHubPermissionError, RateLimitError
                 
                 if isinstance(e, GitHubPermissionError):
-                    limitations.append("insufficient permissions to download logs")
+                    # Include more detailed permission error info
+                    msg = "insufficient permissions to download logs"
+                    if hasattr(e, 'response_message') and e.response_message:
+                        msg += f": {e.response_message}"
+                    limitations.append(msg)
                 elif isinstance(e, RateLimitError):
                     limitations.append(f"rate limit exceeded while fetching logs: {str(e)}")
                 else:
@@ -214,7 +218,11 @@ class EvidenceCollector:
                 elif isinstance(e, NotFoundError):
                     limitations.append(f"File not found: {path}")
                 elif isinstance(e, GitHubPermissionError):
-                    limitations.append(f"Insufficient permissions to fetch {path}")
+                    # Include more detailed permission error info
+                    msg = f"Insufficient permissions to fetch {path}"
+                    if hasattr(e, 'response_message') and e.response_message:
+                        msg += f": {e.response_message}"
+                    limitations.append(msg)
                 elif isinstance(e, RateLimitError):
                     limitations.append(f"Rate limit exceeded while fetching {path}")
                 else:

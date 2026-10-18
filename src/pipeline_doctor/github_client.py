@@ -28,9 +28,17 @@ class NotFoundError(GitHubAPIError):
     pass
 
 
-class PermissionError(GitHubAPIError):
+class GitHubPermissionError(GitHubAPIError):
     """Raised when access is denied (not rate limit)."""
-    pass
+    def __init__(self, message: str, status_code: int = None, response_message: str = None, accepted_permissions: str = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_message = response_message
+        self.accepted_permissions = accepted_permissions
+
+
+# Backward-compatible alias (avoid shadowing Python's builtin PermissionError)
+PermissionError = GitHubPermissionError
 
 
 class NotAFileError(GitHubAPIError):
@@ -53,7 +61,8 @@ class SafeRedirectHandler(HTTPRedirectHandler):
     
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         """Strip Authorization header if redirecting to a different host."""
-        m = self.http_error_302(req, fp, code, msg, headers, newurl)
+        # Call parent's redirect_request to get the new request
+        m = super().redirect_request(req, fp, code, msg, headers, newurl)
         if m:
             # Check if host changed
             from urllib.parse import urlparse
@@ -65,8 +74,6 @@ class SafeRedirectHandler(HTTPRedirectHandler):
                 if 'Authorization' in m.headers:
                     del m.headers['Authorization']
         return m
-    
-    http_error_301 = http_error_303 = http_error_307 = http_error_308 = redirect_request
 
 
 class GitHubClient:
@@ -182,7 +189,35 @@ class GitHubClient:
                     raise RateLimitError(error_msg, reset_at=reset_int)
                 else:
                     # Not a rate limit, it's a permission error
-                    raise PermissionError(error_msg)
+                    # Extract GitHub's response message for better diagnostics
+                    response_message = None
+                    try:
+                        import json
+                        error_json = json.loads(error_body)
+                        response_message = error_json.get("message")
+                    except (json.JSONDecodeError, ValueError):
+                        # If not JSON, use the raw error body (already redacted)
+                        response_message = error_body
+                    
+                    # Get X-Accepted-GitHub-Permissions header if present
+                    accepted_permissions = headers_dict.get('X-Accepted-GitHub-Permissions')
+                    
+                    # Build a more informative error message
+                    detailed_msg = error_msg
+                    if e.code == 401:
+                        detailed_msg = f"Authentication failed (401): {response_message or 'Missing or invalid token'}"
+                    elif e.code == 403:
+                        if accepted_permissions:
+                            detailed_msg = f"Insufficient permissions (403): Token lacks required scope. Required: {accepted_permissions}. Response: {response_message or 'Access denied'}"
+                        else:
+                            detailed_msg = f"Insufficient permissions (403): {response_message or 'Access denied'}"
+                    
+                    raise GitHubPermissionError(
+                        detailed_msg,
+                        status_code=e.code,
+                        response_message=response_message,
+                        accepted_permissions=accepted_permissions
+                    )
             else:
                 raise GitHubAPIError(error_msg)
                 
@@ -298,9 +333,10 @@ class GitHubClient:
             NotAFileError: When path points to a directory
             GitHubAPIError: For other API errors
         """
-        # URL-encode the path
+        # URL-encode the path and ref
         encoded_path = quote(path, safe='/')
-        api_path = f"/repos/{owner}/{repo}/contents/{encoded_path}?ref={ref}"
+        encoded_ref = quote(ref, safe='')
+        api_path = f"/repos/{owner}/{repo}/contents/{encoded_path}?ref={encoded_ref}"
         response = self._get_json(api_path)
         
         # Check if it's a directory
